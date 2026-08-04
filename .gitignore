@@ -1,0 +1,6 @@
+# Secrets — never commit these
+config.json
+client_secret.json
+
+__pycache__/
+*.pyc
