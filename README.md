@@ -66,7 +66,11 @@ Everything runs and stays on your machine. `config.json` (your tokens and feed U
 | Conectar cuenta Google… | Run the OAuth login |
 | Agregar calendario ICS… | Add an ICS feed URL |
 | Quitar calendarios ICS | Remove all ICS feeds |
+| Ocultar por… | Hide for 15 min / 30 min / 1 h / 2 h |
 | Salir | Quit |
+
+While hidden, launching `widget.pyw` again brings it straight back — only one
+instance ever runs, and a second launch just tells the first one to reappear.
 
 ---
 

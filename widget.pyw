@@ -23,6 +23,7 @@ from pathlib import Path
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
 CLIENT_SECRET_PATH = Path(__file__).with_name("client_secret.json")
+SHOW_FLAG = Path(__file__).with_name("show.flag")
 FETCH_INTERVAL_MS = 5 * 60 * 1000  # 5 minutes
 TICK_MS = 5000                     # UI redraw; display has minute granularity
 LOOKAHEAD_DAYS = 30
@@ -418,6 +419,8 @@ class Widget:
         self.notified = set()       # events already toast-notified
         self._compact = None        # current layout mode (None = unset)
         self._hidden_fs = False     # hidden because a fullscreen app is up
+        self._hidden_until = None   # hidden by the user until this time
+        self._is_hidden = False     # window currently parked off-screen
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -463,11 +466,19 @@ class Widget:
                               command=self._add_url)
         self.menu.add_command(label="Quitar calendarios ICS",
                               command=self._clear_urls)
+        hide_menu = tk.Menu(self.menu, tearoff=0)
+        for label, mins in (("15 min", 15), ("30 min", 30),
+                            ("1 hora", 60), ("2 horas", 120)):
+            hide_menu.add_command(label=label,
+                                  command=lambda m=mins: self._hide_for(m))
+        self.menu.add_cascade(label="Ocultar por…", menu=hide_menu)
         self.menu.add_separator()
         self.menu.add_command(label="Salir", command=self._quit)
 
         self.root.deiconify()
         self.root.update_idletasks()
+        x, y = self._visible_pos()
+        self.root.geometry(f"+{x}+{y}")
         try:
             apply_liquid_glass(self.root)
         except Exception:
@@ -611,6 +622,41 @@ class Widget:
             self.title_lbl.pack(anchor="w", before=self.count_lbl)
             self.time_lbl.pack(anchor="w", before=self.count_lbl)
 
+    # Hiding parks the window off-screen instead of withdrawing it:
+    # withdraw/deiconify drops the acrylic surface and the topmost z-order,
+    # so the card came back half-painted until it was moved by hand.
+    def _hide_window(self):
+        if not self._is_hidden:
+            self._is_hidden = True
+            self.root.geometry("+-4000+-4000")
+
+    def _visible_pos(self):
+        """Saved position, clamped so the card always lands on screen.
+
+        A monitor change, a resolution change or a DPI change can leave the
+        stored coordinates outside the desktop, making the widget invisible
+        with no way to drag it back.
+        """
+        x, y = self.cfg.get("x", 60), self.cfg.get("y", 60)
+        self.root.update_idletasks()
+        w = self.root.winfo_width() or 200
+        h = self.root.winfo_height() or 100
+        max_x = self.root.winfo_screenwidth() - w
+        max_y = self.root.winfo_screenheight() - h
+        return max(0, min(x, max_x)), max(0, min(y, max_y))
+
+    def _show_window(self):
+        self._is_hidden = False
+        x, y = self._visible_pos()
+        self.root.geometry(f"+{x}+{y}")
+        self.root.attributes("-topmost", False)
+        self.root.attributes("-topmost", True)  # force back to the front
+        self.root.lift()
+
+    def _hide_for(self, minutes):
+        self._hidden_until = datetime.now() + timedelta(minutes=minutes)
+        self._hide_window()
+
     def _check_fullscreen(self):
         try:
             fs = fullscreen_app_active()
@@ -618,20 +664,28 @@ class Widget:
             fs = False
         if fs and not self._hidden_fs:
             self._hidden_fs = True
-            self.root.withdraw()
+            self._hide_window()
         elif not fs and self._hidden_fs:
             self._hidden_fs = False
-            self.root.deiconify()
-            self.root.attributes("-topmost", True)
-            self.root.update_idletasks()
-            try:
-                apply_liquid_glass(self.root)
-            except Exception:
-                pass
+            if not self._hidden_until:
+                self._show_window()
 
     # ui tick
     def _tick(self):
         now = datetime.now().astimezone()
+        # a second launch of widget.pyw drops show.flag: reappear now
+        if SHOW_FLAG.exists():
+            try:
+                SHOW_FLAG.unlink()
+            except OSError:
+                pass
+            self._hidden_until = None
+            if not self._hidden_fs:
+                self._show_window()
+        if self._hidden_until and datetime.now() >= self._hidden_until:
+            self._hidden_until = None
+            if not self._hidden_fs:
+                self._show_window()
         self._check_fullscreen()
 
         # toast 10 min before the next event (once per event)
@@ -707,4 +761,10 @@ class Widget:
 
 
 if __name__ == "__main__":
+    # single instance: a second launch just tells the first one to show
+    _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _k32.CreateMutexW(None, False, "NextEventWidgetMutex")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        SHOW_FLAG.touch()
+        raise SystemExit
     Widget().root.mainloop()
