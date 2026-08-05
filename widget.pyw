@@ -67,46 +67,20 @@ def toast(title, msg):
 
 
 def fullscreen_app_active():
-    """True when the foreground window covers its whole monitor."""
-    user32 = ctypes.windll.user32
-    hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return False
-    cls = ctypes.create_unicode_buffer(64)
-    user32.GetClassNameW(hwnd, cls, 64)
-    if cls.value in ("Progman", "WorkerW", "Shell_TrayWnd"):
-        return False  # the desktop / taskbar
-    style = user32.GetWindowLongW(hwnd, -16)  # GWL_STYLE
-    if style & 0x00C00000:  # WS_CAPTION: normal (maximized) window
-        return False
+    """True while Windows itself considers a fullscreen app to be running.
 
-    class RECT(ctypes.Structure):
-        _fields_ = [("l", ctypes.c_long), ("t", ctypes.c_long),
-                    ("r", ctypes.c_long), ("b", ctypes.c_long)]
-
-    class MONITORINFO(ctypes.Structure):
-        _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
-                    ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
-
-    rect = RECT()
-    user32.GetWindowRect(hwnd, ctypes.byref(rect))
-    mon = user32.MonitorFromWindow(hwnd, 2)  # MONITOR_DEFAULTTONEAREST
-    mi = MONITORINFO()
-    mi.cbSize = ctypes.sizeof(MONITORINFO)
-    user32.GetMonitorInfoW(mon, ctypes.byref(mi))
-    m, wk = mi.rcMonitor, mi.rcWork
-    covers_monitor = (rect.l <= m.l and rect.t <= m.t
-                      and rect.r >= m.r and rect.b >= m.b)
-    if not covers_monitor:
+    Uses the same signal Windows uses to suppress notifications, so a
+    maximized window never counts (geometry heuristics got that wrong,
+    especially with an auto-hidden taskbar, and left the widget hidden
+    for good).
+    """
+    state = ctypes.c_int()
+    hr = ctypes.windll.shell32.SHQueryUserNotificationState(
+        ctypes.byref(state))
+    if hr != 0:
         return False
-    # A maximized borderless window also covers the monitor, so require it
-    # to spill past the work area (i.e. over the taskbar) to count as
-    # fullscreen. With an auto-hidden taskbar both rects match and any
-    # monitor-covering window is treated as fullscreen.
-    if (wk.l, wk.t, wk.r, wk.b) == (m.l, m.t, m.r, m.b):
-        return True
-    return (rect.l < wk.l or rect.t < wk.t
-            or rect.r > wk.r or rect.b > wk.b)
+    # 2 QUNS_BUSY, 3 QUNS_RUNNING_D3D_FULL_SCREEN, 4 QUNS_PRESENTATION_MODE
+    return state.value in (2, 3, 4)
 
 # iOS dark-mode system palette
 BG = "#1c1c1e"          # systemGray6 dark — tint under the acrylic blur
@@ -648,12 +622,30 @@ class Widget:
         with no way to drag it back.
         """
         x, y = self.cfg.get("x", 60), self.cfg.get("y", 60)
+        return self._clamp(x, y)
+
+    def _clamp(self, x, y):
         self.root.update_idletasks()
-        w = self.root.winfo_width() or 200
-        h = self.root.winfo_height() or 100
+        # requested size, not current: the card is still growing to fit its
+        # text while the window is being placed
+        w = max(self.root.winfo_reqwidth(), self.root.winfo_width(), 120)
+        h = max(self.root.winfo_reqheight(), self.root.winfo_height(), 60)
         max_x = self.root.winfo_screenwidth() - w
         max_y = self.root.winfo_screenheight() - h
         return max(0, min(x, max_x)), max(0, min(y, max_y))
+
+    def _keep_on_screen(self):
+        """Nudge the card back if it ends up off the desktop.
+
+        Covers the window growing after placement, resolution changes and
+        display-scaling changes.
+        """
+        if self._is_hidden:
+            return
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        cx, cy = self._clamp(x, y)
+        if (cx, cy) != (x, y):
+            self.root.geometry(f"+{cx}+{cy}")
 
     def _show_window(self):
         self._is_hidden = False
@@ -698,6 +690,7 @@ class Widget:
             if not self._hidden_fs:
                 self._show_window()
         self._check_fullscreen()
+        self._keep_on_screen()
 
         # toast 10 min before the next event (once per event)
         if self.next_event:
