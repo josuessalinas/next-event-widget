@@ -94,9 +94,19 @@ def fullscreen_app_active():
     mi = MONITORINFO()
     mi.cbSize = ctypes.sizeof(MONITORINFO)
     user32.GetMonitorInfoW(mon, ctypes.byref(mi))
-    m = mi.rcMonitor
-    return (rect.l <= m.l and rect.t <= m.t
-            and rect.r >= m.r and rect.b >= m.b)
+    m, wk = mi.rcMonitor, mi.rcWork
+    covers_monitor = (rect.l <= m.l and rect.t <= m.t
+                      and rect.r >= m.r and rect.b >= m.b)
+    if not covers_monitor:
+        return False
+    # A maximized borderless window also covers the monitor, so require it
+    # to spill past the work area (i.e. over the taskbar) to count as
+    # fullscreen. With an auto-hidden taskbar both rects match and any
+    # monitor-covering window is treated as fullscreen.
+    if (wk.l, wk.t, wk.r, wk.b) == (m.l, m.t, m.r, m.b):
+        return True
+    return (rect.l < wk.l or rect.t < wk.t
+            or rect.r > wk.r or rect.b > wk.b)
 
 # iOS dark-mode system palette
 BG = "#1c1c1e"          # systemGray6 dark — tint under the acrylic blur
@@ -673,15 +683,16 @@ class Widget:
     # ui tick
     def _tick(self):
         now = datetime.now().astimezone()
-        # a second launch of widget.pyw drops show.flag: reappear now
+        # a second launch of widget.pyw drops show.flag: always reappear,
+        # whatever the reason it was hidden (this is the user's escape hatch)
         if SHOW_FLAG.exists():
             try:
                 SHOW_FLAG.unlink()
             except OSError:
                 pass
             self._hidden_until = None
-            if not self._hidden_fs:
-                self._show_window()
+            self._hidden_fs = False
+            self._show_window()
         if self._hidden_until and datetime.now() >= self._hidden_until:
             self._hidden_until = None
             if not self._hidden_fs:
