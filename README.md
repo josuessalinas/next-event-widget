@@ -14,6 +14,7 @@ A tiny always-on-top **Liquid Glass countdown widget for Windows 11** that shows
 - **Liquid Glass look** — real Windows 11 acrylic blur-behind (DWM), rounded corners, iOS dark-mode system palette. Frameless, draggable, remembers its position.
 - **All your calendars** — connects to the Google Calendar API with a one-time OAuth login and watches *every* calendar of your account. Extra ICS feed URLs can be added too.
 - **"Happening now" ring** — during an event, an Apple-style progress ring fills as the event advances.
+- **Focus view** — while an event is running the card can invert: a large Activity-style ring with the percentage done as the hero, the current event's name and time left below it, and the *next* event demoted to the small line. Right-click → **Vista**: `Automática` (switches by itself while an event runs), `Normal` or `Enfoque`.
 - **Live countdown** — to the soonest upcoming event; turns orange under 15 min, red under 5 min.
 - **Toast notifications** — native Windows toast (with sound) 10 minutes before each event.
 - **Click to join** — click the widget to open the event's Meet/Zoom/Teams link, or Google Calendar if there is none. Drag to move (a click that moves is a drag).
@@ -63,6 +64,7 @@ Everything runs and stays on your machine. `config.json` (your tokens and feed U
 | Item | Action |
 |---|---|
 | Actualizar ahora | Refresh immediately |
+| Vista | Automática / Normal / Enfoque |
 | Conectar cuenta Google… | Run the OAuth login |
 | Agregar calendario ICS… | Add an ICS feed URL |
 | Quitar calendarios ICS | Remove all ICS feeds |

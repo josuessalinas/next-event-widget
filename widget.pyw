@@ -405,6 +405,9 @@ class Widget:
         self._hidden_fs = False     # hidden because a fullscreen app is up
         self._hidden_until = None   # hidden by the user until this time
         self._is_hidden = False     # window currently parked off-screen
+        self._focus_view = None     # showing the focus layout (None = unset)
+        self.view_mode = tk.StringVar(
+            value=self.cfg.get("view_mode", "auto"))
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -435,8 +438,26 @@ class Widget:
                                         16, "bold"))
         self.count_lbl.pack(anchor="w", pady=(3, 0))
 
+        # focus view: progress of the current event as the hero, next event
+        # demoted to the small line — the normal view inverted
+        self.focus_box = tk.Frame(frame, bg=BG)
+        self.big_ring = tk.Canvas(self.focus_box, width=78, height=78, bg=BG,
+                                  highlightthickness=0)
+        self.big_ring.pack()
+        self.f_title = tk.Label(self.focus_box, text="", bg=BG, fg=FG,
+                                font=("Segoe UI Variable Text Semibold", 13))
+        self.f_title.pack(pady=(7, 0))
+        self.f_sub = tk.Label(self.focus_box, text="", bg=BG, fg=DIM,
+                              font=("Segoe UI Variable Text", 10))
+        self.f_sub.pack()
+        self.f_next = tk.Label(self.focus_box, text="", bg=BG, fg="#6e6e73",
+                               font=("Segoe UI Variable Text", 9))
+        self.f_next.pack(pady=(7, 0))
+
         for w in (self.root, frame, self.now_row, self.ring, self.now_lbl,
-                  self.title_lbl, self.time_lbl, self.count_lbl):
+                  self.title_lbl, self.time_lbl, self.count_lbl,
+                  self.focus_box, self.big_ring, self.f_title, self.f_sub,
+                  self.f_next):
             w.bind("<Button-1>", self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", self._drag_end)
@@ -450,6 +471,13 @@ class Widget:
                               command=self._add_url)
         self.menu.add_command(label="Quitar calendarios ICS",
                               command=self._clear_urls)
+        view_menu = tk.Menu(self.menu, tearoff=0)
+        for label, val in (("Automática", "auto"), ("Normal", "normal"),
+                           ("Enfoque", "focus")):
+            view_menu.add_radiobutton(label=label, value=val,
+                                      variable=self.view_mode,
+                                      command=self._save_view_mode)
+        self.menu.add_cascade(label="Vista", menu=view_menu)
         hide_menu = tk.Menu(self.menu, tearoff=0)
         for label, mins in (("15 min", 15), ("30 min", 30),
                             ("1 hora", 60), ("2 horas", 120)):
@@ -595,6 +623,39 @@ class Widget:
         self.root.after(FETCH_INTERVAL_MS, lambda: (self.fetch_async(),
                                                     self._schedule_fetch()))
 
+    def _save_view_mode(self):
+        self.cfg["view_mode"] = self.view_mode.get()
+        save_config(self.cfg)
+
+    def _set_view(self, focus):
+        """Swap between the normal layout and the focus (progress) one."""
+        if focus == self._focus_view:
+            return
+        self._focus_view = focus
+        if focus:
+            self.now_row.pack_forget()
+            self.title_lbl.pack_forget()
+            self.time_lbl.pack_forget()
+            self.count_lbl.pack_forget()
+            self._compact = None  # compact only applies to the normal view
+            self.focus_box.pack()
+        else:
+            self.focus_box.pack_forget()
+            self.title_lbl.pack(anchor="w")
+            self.time_lbl.pack(anchor="w")
+            self.count_lbl.pack(anchor="w", pady=(3, 0))
+            self._compact = False
+
+    def _draw_big_ring(self, pct):
+        c = self.big_ring
+        c.delete("all")
+        c.create_oval(7, 7, 71, 71, outline="#3a3a3c", width=6)
+        if pct > 0:
+            c.create_arc(7, 7, 71, 71, start=90, extent=-359.9 * pct,
+                         style="arc", outline="#30d158", width=6)
+        c.create_text(39, 39, text=f"{int(pct * 100)}%", fill=FG,
+                      font=("Segoe UI Variable Display Semib", 17, "bold"))
+
     def _set_compact(self, compact):
         if compact == self._compact:
             return
@@ -706,15 +767,42 @@ class Widget:
                 except Exception:
                     pass
 
-        # compact pill when nothing is happening and the next event is far
-        far = (self.next_event
-               and (self.next_event[1] - now).total_seconds() > COMPACT_AFTER_S)
-        self._set_compact(bool(far) and not self.current_event
-                          and not self.error)
-        # "happening now" line
         if self.current_event and now >= self.current_event[2]:
             self.current_event = None  # just ended
             self.fetch_async()
+        # focus view whenever something is in progress (or forced), and the
+        # normal view otherwise
+        mode = self.view_mode.get()
+        self._set_view(bool(self.current_event) and mode in ("auto", "focus"))
+
+        if not self._focus_view:
+            # compact pill when nothing is happening and the next event is far
+            far = (self.next_event
+                   and (self.next_event[1] - now).total_seconds()
+                   > COMPACT_AFTER_S)
+            self._set_compact(bool(far) and not self.current_event
+                              and not self.error)
+
+        if self._focus_view:
+            c_title, c_start, c_end = self.current_event[:3]
+            total = (c_end - c_start).total_seconds() or 1
+            pct = min(1.0, max(0.0, (now - c_start).total_seconds() / total))
+            self._draw_big_ring(pct)
+            left = max(0, int((c_end - now).total_seconds() // 60))
+            left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
+                        else f"{left} min")
+            self.f_title.config(text=c_title[:28])
+            self.f_sub.config(text=f"termina {c_end:%H:%M} · faltan {left_txt}")
+            if self.next_event:
+                n_title, n_start = self.next_event[0], self.next_event[1]
+                stamp = (f"{n_start:%H:%M}" if n_start.date() == now.date()
+                         else f"{n_start:%a %H:%M}")
+                self.f_next.config(text=f"sigue · {n_title[:22]} · {stamp}")
+            else:
+                self.f_next.config(text="sin eventos después")
+            self.root.after(TICK_MS, self._tick)
+            return
+
         if self.current_event:
             c_title, c_start, c_end = self.current_event[:3]
             total = (c_end - c_start).total_seconds() or 1
