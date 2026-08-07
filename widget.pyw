@@ -89,6 +89,7 @@ DIM = "#98989f"         # secondaryLabel over dark
 AMBER = "#ff9f0a"       # systemOrange
 RED = "#ff453a"         # systemRed
 GREEN = "#0a84ff"       # systemBlue — countdown accent
+CYAN = "#64d2ff"        # systemCyan — the event coming up next
 
 
 def load_config():
@@ -446,18 +447,14 @@ class Widget:
         self.big_ring.pack()
         self.f_title = tk.Label(self.focus_box, text="", bg=BG, fg=FG,
                                 font=("Segoe UI Variable Text Semibold", 13))
-        self.f_title.pack(pady=(7, 0))
-        self.f_sub = tk.Label(self.focus_box, text="", bg=BG, fg=DIM,
-                              font=("Segoe UI Variable Text", 10))
-        self.f_sub.pack()
-        self.f_next = tk.Label(self.focus_box, text="", bg=BG, fg="#6e6e73",
-                               font=("Segoe UI Variable Text", 9))
-        self.f_next.pack(pady=(7, 0))
+        self.f_title.pack(pady=(8, 0))
+        self.f_next = tk.Label(self.focus_box, text="", bg=BG, fg=CYAN,
+                               font=("Segoe UI Variable Text", 10))
+        self.f_next.pack(pady=(2, 0))
 
         for w in (self.root, frame, self.now_row, self.ring, self.now_lbl,
                   self.title_lbl, self.time_lbl, self.count_lbl,
-                  self.focus_box, self.big_ring, self.f_title, self.f_sub,
-                  self.f_next):
+                  self.focus_box, self.big_ring, self.f_title, self.f_next):
             w.bind("<Button-1>", self._drag_start)
             w.bind("<B1-Motion>", self._drag_move)
             w.bind("<ButtonRelease-1>", self._drag_end)
@@ -646,15 +643,16 @@ class Widget:
             self.count_lbl.pack(anchor="w", pady=(3, 0))
             self._compact = False
 
-    def _draw_big_ring(self, pct):
+    def _draw_big_ring(self, pct, label):
         c = self.big_ring
         c.delete("all")
         c.create_oval(7, 7, 71, 71, outline="#3a3a3c", width=6)
         if pct > 0:
             c.create_arc(7, 7, 71, 71, start=90, extent=-359.9 * pct,
                          style="arc", outline="#30d158", width=6)
-        c.create_text(39, 39, text=f"{int(pct * 100)}%", fill=FG,
-                      font=("Segoe UI Variable Display Semib", 17, "bold"))
+        size = 15 if len(label) <= 5 else 13
+        c.create_text(39, 39, text=label, fill=FG,
+                      font=("Segoe UI Variable Display Semib", size, "bold"))
 
     def _set_compact(self, compact):
         if compact == self._compact:
@@ -787,19 +785,18 @@ class Widget:
             c_title, c_start, c_end = self.current_event[:3]
             total = (c_end - c_start).total_seconds() or 1
             pct = min(1.0, max(0.0, (now - c_start).total_seconds() / total))
-            self._draw_big_ring(pct)
             left = max(0, int((c_end - now).total_seconds() // 60))
             left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
-                        else f"{left} min")
+                        else f"{left}m")
+            self._draw_big_ring(pct, left_txt)
             self.f_title.config(text=c_title[:28])
-            self.f_sub.config(text=f"termina {c_end:%H:%M} · faltan {left_txt}")
             if self.next_event:
                 n_title, n_start = self.next_event[0], self.next_event[1]
                 stamp = (f"{n_start:%H:%M}" if n_start.date() == now.date()
                          else f"{n_start:%a %H:%M}")
-                self.f_next.config(text=f"sigue · {n_title[:22]} · {stamp}")
+                self.f_next.config(text=f"{n_title[:24]} · {stamp}")
             else:
-                self.f_next.config(text="sin eventos después")
+                self.f_next.config(text="")
             self.root.after(TICK_MS, self._tick)
             return
 
