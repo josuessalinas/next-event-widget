@@ -31,8 +31,15 @@ OAUTH_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 NOTIFY_BEFORE_S = 10 * 60          # toast 10 min before an event
 MIN_W, MIN_H = 150, 74             # smallest the card can be dragged to
 MAX_LIST_ROWS = 6
-ROW_H = 21                         # height of one agenda row
-STATS_H = 22
+# measured block heights, padding included — the layout budget depends on
+# them, so they must match what the widgets actually request
+ROW_H = 23
+AGENDA_BASE = 38                   # top margin + separator + section header
+STATS_H = 30
+PAD = 28                           # frame padding + border
+H_NOW, H_TITLE, H_TIME, H_COUNT = 26, 28, 26, 37   # normal-view lines
+H_FTITLE, H_NEXT = 35, 24          # focus-view lines
+H_RING_MIN, MAX_RING = 36, 150     # the ring grows with the card
 MEETING_URL = re.compile(
     r"https?://(?:[\w.-]*\.)?(?:meet\.google\.com|zoom\.us|teams\.microsoft"
     r"\.com|teams\.live\.com)/[^\s\"'<>\\,;]+")
@@ -409,7 +416,8 @@ class Widget:
         self.upcoming = []          # every future event, soonest first
         self.error = None
         self.notified = set()       # events already toast-notified
-        self._compact = None        # current layout mode (None = unset)
+        self._stack_key = None      # which blocks are currently packed
+        self._focus_text = None     # text lines shown in the focus view
         self._hidden_fs = False     # hidden because a fullscreen app is up
         self._hidden_until = None   # hidden by the user until this time
         self._is_hidden = False     # window currently parked off-screen
@@ -491,6 +499,10 @@ class Widget:
         self.grip.bind("<Button-1>", self._resize_start)
         self.grip.bind("<B1-Motion>", self._resize_move)
         self.grip.bind("<ButtonRelease-1>", self._resize_end)
+
+        self._blocks = (self.now_row, self.title_lbl, self.time_lbl,
+                        self.count_lbl, self.focus_box, self.list_box,
+                        self.stats_lbl)
 
         # bound on the toplevel only: it sits in every child's bindtags, so
         # one binding covers the whole card. Binding the children as well
@@ -665,28 +677,19 @@ class Widget:
         self.cfg["view_mode"] = self.view_mode.get()
         save_config(self.cfg)
 
-    def _set_view(self, focus):
-        """Swap between the normal layout and the focus (progress) one."""
-        if focus == self._focus_view:
+    def _show_stack(self, key, items):
+        """Show exactly `items`, in order, dropping whatever else was up.
+
+        Re-packing only when the set changes keeps the card from flickering
+        every tick.
+        """
+        if key == self._stack_key:
             return
-        self._focus_view = focus
-        # the agenda is re-packed by _update_agenda, so drop it here to keep
-        # it below whichever block is being swapped in
-        self.list_box.pack_forget()
-        self.stats_lbl.pack_forget()
-        if focus:
-            self.now_row.pack_forget()
-            self.title_lbl.pack_forget()
-            self.time_lbl.pack_forget()
-            self.count_lbl.pack_forget()
-            self._compact = None  # compact only applies to the normal view
-            self.focus_box.pack()
-        else:
-            self.focus_box.pack_forget()
-            self.title_lbl.pack(anchor="w")
-            self.time_lbl.pack(anchor="w")
-            self.count_lbl.pack(anchor="w", pady=(3, 0))
-            self._compact = False
+        self._stack_key = key
+        for w in self._blocks:
+            w.pack_forget()
+        for w, kw in items:
+            w.pack(**kw)
 
     def _draw_big_ring(self, pct, label, px):
         """Draw the ring at `px`, so the focus view fits whatever height."""
@@ -705,17 +708,45 @@ class Widget:
         c.create_text(px / 2, px / 2, text=label, fill=FG,
                       font=("Segoe UI Variable Display Semib", fs, "bold"))
 
-    def _set_compact(self, compact):
-        """Below ~110 px only the countdown fits, so drop the two text lines."""
-        if compact == self._compact:
-            return
-        self._compact = compact
-        if compact:
-            self.title_lbl.pack_forget()
-            self.time_lbl.pack_forget()
+    def _layout_normal(self, inner, ongoing):
+        """Pick the lines that fit, most important first. Returns used px."""
+        items = []
+        used = H_COUNT
+        show_title = inner >= H_COUNT + H_TITLE
+        show_time = inner >= H_COUNT + H_TITLE + H_TIME
+        show_now = ongoing and inner >= H_COUNT + H_TITLE + H_TIME + H_NOW
+        if show_now:
+            items.append((self.now_row, dict(anchor="w", pady=(0, 3))))
+            used += H_NOW
+        if show_title:
+            items.append((self.title_lbl, dict(anchor="w")))
+            used += H_TITLE
+        if show_time:
+            items.append((self.time_lbl, dict(anchor="w")))
+            used += H_TIME
+        items.append((self.count_lbl, dict(anchor="w", pady=(3, 0))))
+        self._show_stack(("n", show_now, show_title, show_time), items)
+        return used
+
+    def _layout_focus(self, inner, width):
+        """Give the ring every pixel the text lines don't need."""
+        if inner >= H_RING_MIN + H_FTITLE + H_NEXT:
+            text_h = H_FTITLE + H_NEXT
+        elif inner >= H_RING_MIN + H_FTITLE:
+            text_h = H_FTITLE
         else:
-            self.title_lbl.pack(anchor="w", before=self.count_lbl)
-            self.time_lbl.pack(anchor="w", before=self.count_lbl)
+            text_h = 0
+        ring = max(H_RING_MIN, min(MAX_RING, inner - text_h, width - 46))
+        self._show_stack(("f", text_h), [(self.focus_box, {})])
+        if text_h != self._focus_text:
+            self._focus_text = text_h
+            self.f_title.pack_forget()
+            self.f_next.pack_forget()
+            if text_h >= H_FTITLE:
+                self.f_title.pack(pady=(7, 0))
+            if text_h > H_FTITLE:
+                self.f_next.pack(pady=(1, 0))
+        return ring, ring + text_h
 
     # resize (drag the corner grip)
     def _resize_start(self, e):
@@ -751,7 +782,7 @@ class Widget:
         the schedule instead of repeating the next event.
         """
         free = self.root.winfo_height() - used_h
-        rows = max(0, min(MAX_LIST_ROWS, (free - 16) // ROW_H))
+        rows = max(0, min(MAX_LIST_ROWS, (free - AGENDA_BASE) // ROW_H))
         events = [e for e in self.upcoming if e[1] > now][skip:skip + rows]
         if not events:
             self.list_box.pack_forget()
@@ -772,7 +803,7 @@ class Widget:
                 row.pack_forget()
         self.list_box.pack(anchor="w", fill="x", pady=(9, 0))
         # day summary when there is still room under the list
-        if free - 16 - len(events) * ROW_H >= STATS_H:
+        if free - AGENDA_BASE - len(events) * ROW_H >= STATS_H:
             today = [e for e in self.upcoming
                      if e[1].date() == now.date() and e[1] > now]
             busy = sum((e[2] - e[1]).total_seconds() for e in today) / 3600
@@ -896,10 +927,9 @@ class Widget:
         # focus view whenever something is in progress (or forced), and the
         # normal view otherwise
         mode = self.view_mode.get()
-        self._set_view(bool(self.current_event) and mode in ("auto", "focus"))
-
-        if not self._focus_view:
-            self._set_compact(self.root.winfo_height() < 110)
+        self._focus_view = (bool(self.current_event)
+                            and mode in ("auto", "focus"))
+        inner = self.root.winfo_height() - PAD
 
         if self._focus_view:
             c_title, c_start, c_end = self.current_event[:3]
@@ -908,17 +938,9 @@ class Widget:
             left = max(0, int((c_end - now).total_seconds() // 60))
             left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
                         else f"{left}m")
-            # the ring takes the room the text lines leave behind
-            h = self.root.winfo_height()
-            text_h = 44 if h >= 118 else 0
-            ring_px = max(34, min(78, h - text_h - 34))
+            ring_px, used = self._layout_focus(inner,
+                                               self.root.winfo_width())
             self._draw_big_ring(pct, left_txt, ring_px)
-            if text_h:
-                self.f_title.pack(pady=(8, 0))
-                self.f_next.pack(pady=(2, 0))
-            else:
-                self.f_title.pack_forget()
-                self.f_next.pack_forget()
             self.f_title.config(text=self._fit_text(c_title))
             if self.next_event:
                 n_title, n_start = self.next_event[0], self.next_event[1]
@@ -928,9 +950,11 @@ class Widget:
                     text=f"{self._fit_text(n_title, 60)} · {stamp}")
             else:
                 self.f_next.config(text="")
-            self._update_agenda(now, ring_px + text_h + 34)
+            self._update_agenda(now, used + PAD)
             self.root.after(TICK_MS, self._tick)
             return
+
+        used = self._layout_normal(inner, bool(self.current_event))
 
         if self.current_event:
             c_title, c_start, c_end = self.current_event[:3]
@@ -943,9 +967,6 @@ class Widget:
                                      extent=-359.9 * pct, style="arc",
                                      outline="#30d158", width=2)
             self.now_lbl.config(text=self._fit_text(c_title, 30))
-            self.now_row.pack(anchor="w", before=self.title_lbl, pady=(0, 3))
-        else:
-            self.now_row.pack_forget()
 
         if self.next_event:
             title, start = self.next_event[0], self.next_event[1]
@@ -978,9 +999,7 @@ class Widget:
             self.title_lbl.config(text="Sin eventos próximos")
             self.time_lbl.config(text=f"(próximos {LOOKAHEAD_DAYS} días)")
             self.count_lbl.config(text="—", fg=DIM)
-        # the agenda repeats the next event in the top block, so skip it here
-        used = 74 if self._compact else 119
-        self._update_agenda(now, used + (24 if self.current_event else 0))
+        self._update_agenda(now, used + PAD)
         self.root.after(TICK_MS, self._tick)
 
 
