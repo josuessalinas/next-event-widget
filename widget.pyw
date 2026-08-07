@@ -93,6 +93,9 @@ AMBER = "#ff9f0a"       # systemOrange
 RED = "#ff453a"         # systemRed
 GREEN = "#0a84ff"       # systemBlue — countdown accent
 CYAN = "#64d2ff"        # systemCyan — the event coming up next
+LABEL2 = "#d1d1d6"      # secondaryLabel — agenda titles
+TERTIARY = "#6e6e73"    # tertiaryLabel — section header, day summary
+SEP = "#38383a"         # separator hairline
 
 
 def load_config():
@@ -461,17 +464,22 @@ class Widget:
 
         # agenda: shown when the card is tall enough to fit rows
         self.list_box = tk.Frame(frame, bg=BG)
-        self.list_head = tk.Label(self.list_box, text="PRÓXIMOS", bg=BG,
-                                  fg="#6e6e73",
-                                  font=("Segoe UI Variable Text", 8, "bold"))
-        self.list_head.pack(anchor="w", pady=(0, 2))
+        tk.Frame(self.list_box, bg=SEP, height=1).pack(fill="x", pady=(0, 7))
+        self.list_head = tk.Label(self.list_box, text="P R Ó X I M O S",
+                                  bg=BG, fg=TERTIARY,
+                                  font=("Segoe UI Variable Text", 7, "bold"))
+        self.list_head.pack(anchor="w", pady=(0, 3))
         self.list_rows = []
         for _ in range(MAX_LIST_ROWS):
-            row = tk.Label(self.list_box, text="", bg=BG, fg=DIM, anchor="w",
-                           justify="left",
-                           font=("Segoe UI Variable Text", 10))
-            self.list_rows.append(row)
-        self.stats_lbl = tk.Label(frame, text="", bg=BG, fg="#6e6e73",
+            row = tk.Frame(self.list_box, bg=BG)
+            stamp = tk.Label(row, text="", bg=BG, fg=CYAN, anchor="w",
+                             font=("Segoe UI Variable Text", 10))
+            stamp.pack(side="left")
+            name = tk.Label(row, text="", bg=BG, fg=LABEL2, anchor="w",
+                            font=("Segoe UI Variable Text", 10))
+            name.pack(side="left", padx=(8, 0))
+            self.list_rows.append((row, stamp, name))
+        self.stats_lbl = tk.Label(frame, text="", bg=BG, fg=TERTIARY,
                                   font=("Segoe UI Variable Text", 9))
 
         # resize grip, bottom-right corner
@@ -484,13 +492,13 @@ class Widget:
         self.grip.bind("<B1-Motion>", self._resize_move)
         self.grip.bind("<ButtonRelease-1>", self._resize_end)
 
-        for w in (self.root, frame, self.now_row, self.ring, self.now_lbl,
-                  self.title_lbl, self.time_lbl, self.count_lbl,
-                  self.focus_box, self.big_ring, self.f_title, self.f_next):
-            w.bind("<Button-1>", self._drag_start)
-            w.bind("<B1-Motion>", self._drag_move)
-            w.bind("<ButtonRelease-1>", self._drag_end)
-            w.bind("<Button-3>", self._menu)
+        # bound on the toplevel only: it sits in every child's bindtags, so
+        # one binding covers the whole card. Binding the children as well
+        # fired each handler twice (a click opened two tabs).
+        self.root.bind("<Button-1>", self._drag_start)
+        self.root.bind("<B1-Motion>", self._drag_move)
+        self.root.bind("<ButtonRelease-1>", self._drag_end)
+        self.root.bind("<Button-3>", self._menu)
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Actualizar ahora", command=self.fetch_async)
@@ -680,16 +688,22 @@ class Widget:
             self.count_lbl.pack(anchor="w", pady=(3, 0))
             self._compact = False
 
-    def _draw_big_ring(self, pct, label):
+    def _draw_big_ring(self, pct, label, px):
+        """Draw the ring at `px`, so the focus view fits whatever height."""
         c = self.big_ring
+        c.config(width=px, height=px)
         c.delete("all")
-        c.create_oval(7, 7, 71, 71, outline="#3a3a3c", width=6)
+        stroke = max(3, px // 13)
+        m = stroke // 2 + 2                       # inset so the arc fits
+        c.delete("all")
+        c.create_oval(m, m, px - m, px - m, outline="#3a3a3c", width=stroke)
         if pct > 0:
-            c.create_arc(7, 7, 71, 71, start=90, extent=-359.9 * pct,
-                         style="arc", outline="#30d158", width=6)
-        size = 15 if len(label) <= 5 else 13
-        c.create_text(39, 39, text=label, fill=FG,
-                      font=("Segoe UI Variable Display Semib", size, "bold"))
+            c.create_arc(m, m, px - m, px - m, start=90,
+                         extent=-359.9 * pct, style="arc",
+                         outline="#30d158", width=stroke)
+        fs = max(8, int(px / (4.6 if len(label) <= 5 else 5.4)))
+        c.create_text(px / 2, px / 2, text=label, fill=FG,
+                      font=("Segoe UI Variable Display Semib", fs, "bold"))
 
     def _set_compact(self, compact):
         """Below ~110 px only the countdown fits, so drop the two text lines."""
@@ -743,15 +757,16 @@ class Widget:
             self.list_box.pack_forget()
             self.stats_lbl.pack_forget()
             return
-        for i, row in enumerate(self.list_rows):
+        # one stamp column for the whole list, so the titles line up
+        same_day = all(e[1].date() == now.date() for e in events)
+        col = 5 if same_day else 12
+        for i, (row, stamp_lbl, name_lbl) in enumerate(self.list_rows):
             if i < len(events):
                 title, start = events[i][0], events[i][1]
-                stamp = (f"{start:%H:%M}" if start.date() == now.date()
+                stamp = (f"{start:%H:%M}" if same_day
                          else f"{start:%a %d} {start:%H:%M}")
-                # the stamp width varies (05:00 vs Mon 10 05:00), so the
-                # title gets whatever room is left after it
-                title = self._fit_text(title, len(stamp) * 7 + 20)
-                row.config(text=f"{stamp}   {title}")
+                stamp_lbl.config(text=stamp, width=col)
+                name_lbl.config(text=self._fit_text(title, col * 7 + 20))
                 row.pack(anchor="w", fill="x")
             else:
                 row.pack_forget()
@@ -761,10 +776,12 @@ class Widget:
             today = [e for e in self.upcoming
                      if e[1].date() == now.date() and e[1] > now]
             busy = sum((e[2] - e[1]).total_seconds() for e in today) / 3600
-            left = "sin eventos" if not today else (
-                f"{len(today)} evento{'s' if len(today) > 1 else ''} · "
-                f"{busy:.1f} h")
-            self.stats_lbl.config(text=f"hoy · {left}")
+            if today:
+                txt = (f"{len(today)} evento{'s' if len(today) > 1 else ''} "
+                       f"hoy · {busy:.1f} h")
+            else:
+                txt = "nada más por hoy"
+            self.stats_lbl.config(text=txt)
             self.stats_lbl.pack(anchor="w", pady=(8, 0))
         else:
             self.stats_lbl.pack_forget()
@@ -891,7 +908,17 @@ class Widget:
             left = max(0, int((c_end - now).total_seconds() // 60))
             left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
                         else f"{left}m")
-            self._draw_big_ring(pct, left_txt)
+            # the ring takes the room the text lines leave behind
+            h = self.root.winfo_height()
+            text_h = 44 if h >= 118 else 0
+            ring_px = max(34, min(78, h - text_h - 34))
+            self._draw_big_ring(pct, left_txt, ring_px)
+            if text_h:
+                self.f_title.pack(pady=(8, 0))
+                self.f_next.pack(pady=(2, 0))
+            else:
+                self.f_title.pack_forget()
+                self.f_next.pack_forget()
             self.f_title.config(text=self._fit_text(c_title))
             if self.next_event:
                 n_title, n_start = self.next_event[0], self.next_event[1]
@@ -901,7 +928,7 @@ class Widget:
                     text=f"{self._fit_text(n_title, 60)} · {stamp}")
             else:
                 self.f_next.config(text="")
-            self._update_agenda(now, 190)
+            self._update_agenda(now, ring_px + text_h + 34)
             self.root.after(TICK_MS, self._tick)
             return
 
