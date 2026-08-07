@@ -13,6 +13,7 @@ import re
 import subprocess
 import threading
 import tkinter as tk
+from tkinter import font as tkfont
 from tkinter import simpledialog, messagebox
 import urllib.request
 import urllib.parse
@@ -37,8 +38,6 @@ ROW_H = 23
 AGENDA_BASE = 38                   # top margin + separator + section header
 STATS_H = 30
 PAD = 28                           # frame padding + border
-H_NOW, H_TITLE, H_TIME, H_COUNT = 26, 28, 26, 37   # normal-view lines
-H_FTITLE, H_NEXT = 35, 24          # focus-view lines
 H_RING_MIN, MAX_RING = 36, 150     # the ring grows with the card
 MEETING_URL = re.compile(
     r"https?://(?:[\w.-]*\.)?(?:meet\.google\.com|zoom\.us|teams\.microsoft"
@@ -417,13 +416,19 @@ class Widget:
         self.error = None
         self.notified = set()       # events already toast-notified
         self._stack_key = None      # which blocks are currently packed
-        self._focus_text = None     # text lines shown in the focus view
+        self._focus_text = ()       # text lines shown in the focus view
         self._hidden_fs = False     # hidden because a fullscreen app is up
         self._hidden_until = None   # hidden by the user until this time
         self._is_hidden = False     # window currently parked off-screen
         self._focus_view = None     # showing the focus layout (None = unset)
         self.view_mode = tk.StringVar(
             value=self.cfg.get("view_mode", "auto"))
+
+        # real Font objects: the layout measures with the very metrics the
+        # labels render with, instead of guessing pixels per character
+        self.fnt_title = tkfont.Font(family="Segoe UI Variable Text Semibold",
+                                     size=13)
+        self.fnt_body = tkfont.Font(family="Segoe UI Variable Text", size=10)
 
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -446,8 +451,7 @@ class Widget:
                                 font=("Segoe UI Variable Text Semibold", 10))
         self.now_lbl.pack(side="left")
         self.title_lbl = tk.Label(frame, text="Cargando…", bg=BG, fg=FG,
-                                  font=("Segoe UI Variable Text Semibold",
-                                        13))
+                                  justify="left", font=self.fnt_title)
         self.title_lbl.pack(anchor="w")
         self.time_lbl = tk.Label(frame, text="", bg=BG, fg=DIM,
                                  font=("Segoe UI Variable Text", 11))
@@ -464,11 +468,14 @@ class Widget:
                                   highlightthickness=0)
         self.big_ring.pack()
         self.f_title = tk.Label(self.focus_box, text="", bg=BG, fg=FG,
-                                font=("Segoe UI Variable Text Semibold", 13))
+                                justify="center", font=self.fnt_title)
         self.f_title.pack(pady=(8, 0))
         self.f_next = tk.Label(self.focus_box, text="", bg=BG, fg=CYAN,
-                               font=("Segoe UI Variable Text", 10))
-        self.f_next.pack(pady=(2, 0))
+                               font=self.fnt_body)
+        self.f_next.pack(pady=(3, 0))
+        self.f_when = tk.Label(self.focus_box, text="", bg=BG, fg=CYAN,
+                               font=("Segoe UI Variable Text", 9))
+        self.f_when.pack()
 
         # agenda: shown when the card is tall enough to fit rows
         self.list_box = tk.Frame(frame, bg=BG)
@@ -484,7 +491,7 @@ class Widget:
                              font=("Segoe UI Variable Text", 10))
             stamp.pack(side="left")
             name = tk.Label(row, text="", bg=BG, fg=LABEL2, anchor="w",
-                            font=("Segoe UI Variable Text", 10))
+                            font=self.fnt_body)
             name.pack(side="left", padx=(8, 0))
             self.list_rows.append((row, stamp, name))
         self.stats_lbl = tk.Label(frame, text="", bg=BG, fg=TERTIARY,
@@ -503,6 +510,7 @@ class Widget:
         self._blocks = (self.now_row, self.title_lbl, self.time_lbl,
                         self.count_lbl, self.focus_box, self.list_box,
                         self.stats_lbl)
+        self.f_when.pack_forget()   # packed on demand by the focus layout
 
         # bound on the toplevel only: it sits in every child's bindtags, so
         # one binding covers the whole card. Binding the children as well
@@ -708,44 +716,84 @@ class Widget:
         c.create_text(px / 2, px / 2, text=label, fill=FG,
                       font=("Segoe UI Variable Display Semib", fs, "bold"))
 
-    def _layout_normal(self, inner, ongoing):
+    def _title_heights(self, lbl, title, pad):
+        """(one-line, wrapped) heights for `title`, measured not guessed."""
+        lbl.config(wraplength=self._avail(),
+                   text=self._fit(self.fnt_title, title, lines=2))
+        two = lbl.winfo_reqheight() + pad
+        lbl.config(wraplength=0, text=self._fit(self.fnt_title, title))
+        return lbl.winfo_reqheight() + pad, two
+
+    def _layout_normal(self, inner, ongoing, title):
         """Pick the lines that fit, most important first. Returns used px."""
+        h1, h2 = self._title_heights(self.title_lbl, title, 0)
+        h_time = self.time_lbl.winfo_reqheight()
+        h_count = self.count_lbl.winfo_reqheight() + 3
+        h_now = self.now_row.winfo_reqheight() + 3
+        show_title = inner >= h_count + h1
+        show_time = show_title and inner >= h_count + h1 + h_time
+        show_now = (ongoing and show_time
+                    and inner >= h_count + h1 + h_time + h_now)
+        used = h_count + (h1 if show_title else 0) \
+            + (h_time if show_time else 0) + (h_now if show_now else 0)
+        two = show_title and h2 > h1 and inner - used >= h2 - h1
+        if two:
+            used += h2 - h1
+            self.title_lbl.config(wraplength=self._avail(),
+                                  text=self._fit(self.fnt_title, title,
+                                                 lines=2))
         items = []
-        used = H_COUNT
-        show_title = inner >= H_COUNT + H_TITLE
-        show_time = inner >= H_COUNT + H_TITLE + H_TIME
-        show_now = ongoing and inner >= H_COUNT + H_TITLE + H_TIME + H_NOW
         if show_now:
             items.append((self.now_row, dict(anchor="w", pady=(0, 3))))
-            used += H_NOW
         if show_title:
             items.append((self.title_lbl, dict(anchor="w")))
-            used += H_TITLE
         if show_time:
             items.append((self.time_lbl, dict(anchor="w")))
-            used += H_TIME
         items.append((self.count_lbl, dict(anchor="w", pady=(3, 0))))
-        self._show_stack(("n", show_now, show_title, show_time), items)
+        self._show_stack(("n", show_now, show_title, show_time, two), items)
         return used
 
-    def _layout_focus(self, inner, width):
-        """Give the ring every pixel the text lines don't need."""
-        if inner >= H_RING_MIN + H_FTITLE + H_NEXT:
-            text_h = H_FTITLE + H_NEXT
-        elif inner >= H_RING_MIN + H_FTITLE:
-            text_h = H_FTITLE
+    def _lines_needed(self, text, extra=0):
+        """2 when the title is too long for one line at the current width."""
+        return 2 if self.fnt_title.measure(text) > self._avail(extra) else 1
+
+    def _layout_focus(self, inner, width, title):
+        """Give the ring every pixel the text lines don't need.
+
+        Tries the richest arrangement first — wrapped title, next event and
+        its date on their own lines — and drops one line at a time until
+        the ring still has room.
+        """
+        h1, h2 = self._title_heights(self.f_title, title, 7)
+        h_next = self.f_next.winfo_reqheight() + 3
+        h_when = self.f_when.winfo_reqheight()
+        combos = ((h2 > h1, True, True), (False, True, True),
+                  (False, True, False), (False, False, False))
+        text_h = 0
+        for two, name, when in combos:
+            text_h = ((h2 if two else h1) + (h_next if name else 0)
+                      + (h_when if when else 0))
+            if inner - text_h >= H_RING_MIN:
+                break
         else:
+            two = name = when = False
             text_h = 0
+        if two:
+            self.f_title.config(wraplength=self._avail(),
+                                text=self._fit(self.fnt_title, title, lines=2))
         ring = max(H_RING_MIN, min(MAX_RING, inner - text_h, width - 46))
-        self._show_stack(("f", text_h), [(self.focus_box, {})])
-        if text_h != self._focus_text:
-            self._focus_text = text_h
-            self.f_title.pack_forget()
-            self.f_next.pack_forget()
-            if text_h >= H_FTITLE:
+        self._show_stack(("f", text_h > 0), [(self.focus_box, {})])
+        key = (two, name, when)
+        if key != self._focus_text:
+            self._focus_text = key
+            for wdg in (self.f_title, self.f_next, self.f_when):
+                wdg.pack_forget()
+            if text_h:
                 self.f_title.pack(pady=(7, 0))
-            if text_h > H_FTITLE:
-                self.f_next.pack(pady=(1, 0))
+            if name:
+                self.f_next.pack(pady=(3, 0))
+            if when:
+                self.f_when.pack()
         return ring, ring + text_h
 
     # resize (drag the corner grip)
@@ -770,10 +818,27 @@ class Widget:
             pass
         return "break"
 
+    def _avail(self, extra=0):
+        return max(40, self.root.winfo_width() - 46 - extra)
+
+    def _fit(self, font, text, extra=0, lines=1):
+        """Trim `text` until it fits `lines` lines at the current width."""
+        room = self._avail(extra) * lines
+        if lines > 1:
+            room = int(room * 0.9)   # word wrapping never fills a line fully
+        if font.measure(text) <= room:
+            return text
+        lo, hi = 1, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if font.measure(text[:mid] + "…") <= room:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo].rstrip() + "…"
+
     def _fit_text(self, text, extra=0):
-        """Trim to what the current width can show (~7 px per character)."""
-        room = max(8, (self.root.winfo_width() - 46 - extra) // 7)
-        return text if len(text) <= room else text[:room - 1] + "…"
+        return self._fit(self.fnt_body, text, extra)
 
     def _update_agenda(self, now, used_h, skip=1):
         """Fill the agenda with as many upcoming events as the height allows.
@@ -938,23 +1003,32 @@ class Widget:
             left = max(0, int((c_end - now).total_seconds() // 60))
             left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
                         else f"{left}m")
-            ring_px, used = self._layout_focus(inner,
-                                               self.root.winfo_width())
+            width = self.root.winfo_width()
+            if self.next_event:
+                self.f_next.config(text=self._fit_text(self.next_event[0]))
+            ring_px, used = self._layout_focus(inner, width, c_title)
             self._draw_big_ring(pct, left_txt, ring_px)
-            self.f_title.config(text=self._fit_text(c_title))
             if self.next_event:
                 n_title, n_start = self.next_event[0], self.next_event[1]
-                stamp = (f"{n_start:%H:%M}" if n_start.date() == now.date()
-                         else f"{n_start:%a %H:%M}")
-                self.f_next.config(
-                    text=f"{self._fit_text(n_title, 60)} · {stamp}")
+                self.f_next.config(text=self._fit_text(n_title))
+                self.f_when.config(
+                    text=n_start.strftime("%a %d %b · %H:%M")
+                    if n_start.date() != now.date()
+                    else f"hoy · {n_start:%H:%M}")
             else:
-                self.f_next.config(text="")
+                self.f_next.config(text="—")
+                self.f_when.config(text="")
             self._update_agenda(now, used + PAD)
             self.root.after(TICK_MS, self._tick)
             return
 
-        used = self._layout_normal(inner, bool(self.current_event))
+        if self.next_event:
+            n_title = self.next_event[0]
+        elif self.error:
+            n_title = "Error de conexión"
+        else:
+            n_title = "Sin eventos próximos"
+        used = self._layout_normal(inner, bool(self.current_event), n_title)
 
         if self.current_event:
             c_title, c_start, c_end = self.current_event[:3]
@@ -989,14 +1063,11 @@ class Widget:
                     txt = "< 1 min"
                 color = RED if s < 300 else AMBER if s < 900 else GREEN
                 self.count_lbl.config(text=txt, fg=color)
-            self.title_lbl.config(text=self._fit_text(title))
             self.time_lbl.config(text=start.strftime("%a %d %b · %H:%M"))
         elif self.error:
-            self.title_lbl.config(text="Error de conexión")
             self.time_lbl.config(text=self._fit_text(str(self.error)))
             self.count_lbl.config(text="—", fg=DIM)
         else:
-            self.title_lbl.config(text="Sin eventos próximos")
             self.time_lbl.config(text=f"(próximos {LOOKAHEAD_DAYS} días)")
             self.count_lbl.config(text="—", fg=DIM)
         self._update_agenda(now, used + PAD)
