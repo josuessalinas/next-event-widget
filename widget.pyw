@@ -29,7 +29,10 @@ TICK_MS = 5000                     # UI redraw; display has minute granularity
 LOOKAHEAD_DAYS = 30
 OAUTH_SCOPE = "https://www.googleapis.com/auth/calendar.readonly"
 NOTIFY_BEFORE_S = 10 * 60          # toast 10 min before an event
-COMPACT_AFTER_S = 3 * 3600         # pill mode when next event > 3 h away
+MIN_W, MIN_H = 150, 74             # smallest the card can be dragged to
+MAX_LIST_ROWS = 6
+ROW_H = 21                         # height of one agenda row
+STATS_H = 22
 MEETING_URL = re.compile(
     r"https?://(?:[\w.-]*\.)?(?:meet\.google\.com|zoom\.us|teams\.microsoft"
     r"\.com|teams\.live\.com)/[^\s\"'<>\\,;]+")
@@ -400,6 +403,7 @@ class Widget:
 
         self.next_event = None      # (title, start, end, link) or None
         self.current_event = None   # event happening right now, or None
+        self.upcoming = []          # every future event, soonest first
         self.error = None
         self.notified = set()       # events already toast-notified
         self._compact = None        # current layout mode (None = unset)
@@ -414,12 +418,15 @@ class Widget:
         self.root.attributes("-topmost", True)
         self.root.configure(bg=BG)
         x, y = self.cfg.get("x", 60), self.cfg.get("y", 60)
-        self.root.geometry(f"+{x}+{y}")
+        w = max(MIN_W, self.cfg.get("w", 212))
+        h = max(MIN_H, self.cfg.get("h", 119))
+        self.root.geometry(f"{w}x{h}+{x}+{y}")
 
         frame = tk.Frame(self.root, bg=BG, padx=20, pady=13,
                          highlightthickness=1,
                          highlightbackground="#8a8a94")
-        frame.pack()
+        frame.pack(fill="both", expand=True)
+        self.frame = frame
         self.now_row = tk.Frame(frame, bg=BG)
         self.ring = tk.Canvas(self.now_row, width=18, height=18, bg=BG,
                               highlightthickness=0)
@@ -451,6 +458,31 @@ class Widget:
         self.f_next = tk.Label(self.focus_box, text="", bg=BG, fg=CYAN,
                                font=("Segoe UI Variable Text", 10))
         self.f_next.pack(pady=(2, 0))
+
+        # agenda: shown when the card is tall enough to fit rows
+        self.list_box = tk.Frame(frame, bg=BG)
+        self.list_head = tk.Label(self.list_box, text="PRÓXIMOS", bg=BG,
+                                  fg="#6e6e73",
+                                  font=("Segoe UI Variable Text", 8, "bold"))
+        self.list_head.pack(anchor="w", pady=(0, 2))
+        self.list_rows = []
+        for _ in range(MAX_LIST_ROWS):
+            row = tk.Label(self.list_box, text="", bg=BG, fg=DIM, anchor="w",
+                           justify="left",
+                           font=("Segoe UI Variable Text", 10))
+            self.list_rows.append(row)
+        self.stats_lbl = tk.Label(frame, text="", bg=BG, fg="#6e6e73",
+                                  font=("Segoe UI Variable Text", 9))
+
+        # resize grip, bottom-right corner
+        self.grip = tk.Canvas(self.root, width=14, height=14, bg=BG,
+                              highlightthickness=0, cursor="size_nw_se")
+        for off in (2, 6, 10):
+            self.grip.create_line(13 - off, 13, 13, 13 - off, fill="#6e6e73")
+        self.grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.grip.bind("<Button-1>", self._resize_start)
+        self.grip.bind("<B1-Motion>", self._resize_move)
+        self.grip.bind("<ButtonRelease-1>", self._resize_end)
 
         for w in (self.root, frame, self.now_row, self.ring, self.now_lbl,
                   self.title_lbl, self.time_lbl, self.count_lbl,
@@ -613,7 +645,8 @@ class Widget:
             # ongoing: the one that started most recently
             self.current_event = max(ongoing, key=lambda e: e[1],
                                      default=None)
-            self.next_event = min(future, key=lambda e: e[1], default=None)
+            self.upcoming = sorted(future, key=lambda e: e[1])
+            self.next_event = self.upcoming[0] if self.upcoming else None
             self.error = None
 
     def _schedule_fetch(self):
@@ -629,6 +662,10 @@ class Widget:
         if focus == self._focus_view:
             return
         self._focus_view = focus
+        # the agenda is re-packed by _update_agenda, so drop it here to keep
+        # it below whichever block is being swapped in
+        self.list_box.pack_forget()
+        self.stats_lbl.pack_forget()
         if focus:
             self.now_row.pack_forget()
             self.title_lbl.pack_forget()
@@ -655,6 +692,7 @@ class Widget:
                       font=("Segoe UI Variable Display Semib", size, "bold"))
 
     def _set_compact(self, compact):
+        """Below ~110 px only the countdown fits, so drop the two text lines."""
         if compact == self._compact:
             return
         self._compact = compact
@@ -664,6 +702,72 @@ class Widget:
         else:
             self.title_lbl.pack(anchor="w", before=self.count_lbl)
             self.time_lbl.pack(anchor="w", before=self.count_lbl)
+
+    # resize (drag the corner grip)
+    def _resize_start(self, e):
+        self._rs = (e.x_root, e.y_root,
+                    self.root.winfo_width(), self.root.winfo_height())
+        return "break"
+
+    def _resize_move(self, e):
+        w = max(MIN_W, self._rs[2] + e.x_root - self._rs[0])
+        h = max(MIN_H, self._rs[3] + e.y_root - self._rs[1])
+        self.root.geometry(f"{w}x{h}")
+        return "break"
+
+    def _resize_end(self, _e):
+        self.cfg["w"] = self.root.winfo_width()
+        self.cfg["h"] = self.root.winfo_height()
+        save_config(self.cfg)
+        try:
+            apply_liquid_glass(self.root)  # recompose the enlarged surface
+        except Exception:
+            pass
+        return "break"
+
+    def _fit_text(self, text, extra=0):
+        """Trim to what the current width can show (~7 px per character)."""
+        room = max(8, (self.root.winfo_width() - 46 - extra) // 7)
+        return text if len(text) <= room else text[:room - 1] + "…"
+
+    def _update_agenda(self, now, used_h, skip=1):
+        """Fill the agenda with as many upcoming events as the height allows.
+
+        `skip` drops the events already shown above, so the list continues
+        the schedule instead of repeating the next event.
+        """
+        free = self.root.winfo_height() - used_h
+        rows = max(0, min(MAX_LIST_ROWS, (free - 16) // ROW_H))
+        events = [e for e in self.upcoming if e[1] > now][skip:skip + rows]
+        if not events:
+            self.list_box.pack_forget()
+            self.stats_lbl.pack_forget()
+            return
+        for i, row in enumerate(self.list_rows):
+            if i < len(events):
+                title, start = events[i][0], events[i][1]
+                stamp = (f"{start:%H:%M}" if start.date() == now.date()
+                         else f"{start:%a %d} {start:%H:%M}")
+                # the stamp width varies (05:00 vs Mon 10 05:00), so the
+                # title gets whatever room is left after it
+                title = self._fit_text(title, len(stamp) * 7 + 20)
+                row.config(text=f"{stamp}   {title}")
+                row.pack(anchor="w", fill="x")
+            else:
+                row.pack_forget()
+        self.list_box.pack(anchor="w", fill="x", pady=(9, 0))
+        # day summary when there is still room under the list
+        if free - 16 - len(events) * ROW_H >= STATS_H:
+            today = [e for e in self.upcoming
+                     if e[1].date() == now.date() and e[1] > now]
+            busy = sum((e[2] - e[1]).total_seconds() for e in today) / 3600
+            left = "sin eventos" if not today else (
+                f"{len(today)} evento{'s' if len(today) > 1 else ''} · "
+                f"{busy:.1f} h")
+            self.stats_lbl.config(text=f"hoy · {left}")
+            self.stats_lbl.pack(anchor="w", pady=(8, 0))
+        else:
+            self.stats_lbl.pack_forget()
 
     # Hiding parks the window off-screen instead of withdrawing it:
     # withdraw/deiconify drops the acrylic surface and the topmost z-order,
@@ -687,8 +791,12 @@ class Widget:
         self.root.update_idletasks()
         # requested size, not current: the card is still growing to fit its
         # text while the window is being placed
-        w = max(self.root.winfo_reqwidth(), self.root.winfo_width(), 120)
-        h = max(self.root.winfo_reqheight(), self.root.winfo_height(), 60)
+        # the window carries an explicit size, so its real size wins; the
+        # requested one only covers the moment before it is mapped
+        w = self.root.winfo_width() if self.root.winfo_width() > 1 else \
+            max(self.root.winfo_reqwidth(), MIN_W)
+        h = self.root.winfo_height() if self.root.winfo_height() > 1 else \
+            max(self.root.winfo_reqheight(), MIN_H)
         max_x = self.root.winfo_screenwidth() - w
         max_y = self.root.winfo_screenheight() - h
         return max(0, min(x, max_x)), max(0, min(y, max_y))
@@ -774,12 +882,7 @@ class Widget:
         self._set_view(bool(self.current_event) and mode in ("auto", "focus"))
 
         if not self._focus_view:
-            # compact pill when nothing is happening and the next event is far
-            far = (self.next_event
-                   and (self.next_event[1] - now).total_seconds()
-                   > COMPACT_AFTER_S)
-            self._set_compact(bool(far) and not self.current_event
-                              and not self.error)
+            self._set_compact(self.root.winfo_height() < 110)
 
         if self._focus_view:
             c_title, c_start, c_end = self.current_event[:3]
@@ -789,14 +892,16 @@ class Widget:
             left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
                         else f"{left}m")
             self._draw_big_ring(pct, left_txt)
-            self.f_title.config(text=c_title[:28])
+            self.f_title.config(text=self._fit_text(c_title))
             if self.next_event:
                 n_title, n_start = self.next_event[0], self.next_event[1]
                 stamp = (f"{n_start:%H:%M}" if n_start.date() == now.date()
                          else f"{n_start:%a %H:%M}")
-                self.f_next.config(text=f"{n_title[:24]} · {stamp}")
+                self.f_next.config(
+                    text=f"{self._fit_text(n_title, 60)} · {stamp}")
             else:
                 self.f_next.config(text="")
+            self._update_agenda(now, 190)
             self.root.after(TICK_MS, self._tick)
             return
 
@@ -810,7 +915,7 @@ class Widget:
                 self.ring.create_arc(3, 3, 15, 15, start=90,
                                      extent=-359.9 * pct, style="arc",
                                      outline="#30d158", width=2)
-            self.now_lbl.config(text=c_title[:30])
+            self.now_lbl.config(text=self._fit_text(c_title, 30))
             self.now_row.pack(anchor="w", before=self.title_lbl, pady=(0, 3))
         else:
             self.now_row.pack_forget()
@@ -836,16 +941,19 @@ class Widget:
                     txt = "< 1 min"
                 color = RED if s < 300 else AMBER if s < 900 else GREEN
                 self.count_lbl.config(text=txt, fg=color)
-            self.title_lbl.config(text=title[:40])
+            self.title_lbl.config(text=self._fit_text(title))
             self.time_lbl.config(text=start.strftime("%a %d %b · %H:%M"))
         elif self.error:
             self.title_lbl.config(text="Error de conexión")
-            self.time_lbl.config(text=str(self.error)[:45])
+            self.time_lbl.config(text=self._fit_text(str(self.error)))
             self.count_lbl.config(text="—", fg=DIM)
         else:
             self.title_lbl.config(text="Sin eventos próximos")
             self.time_lbl.config(text=f"(próximos {LOOKAHEAD_DAYS} días)")
             self.count_lbl.config(text="—", fg=DIM)
+        # the agenda repeats the next event in the top block, so skip it here
+        used = 74 if self._compact else 119
+        self._update_agenda(now, used + (24 if self.current_event else 0))
         self.root.after(TICK_MS, self._tick)
 
 

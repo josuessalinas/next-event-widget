@@ -18,7 +18,7 @@ A tiny always-on-top **Liquid Glass countdown widget for Windows 11** that shows
 - **Live countdown** — to the soonest upcoming event; turns orange under 15 min, red under 5 min.
 - **Toast notifications** — native Windows toast (with sound) 10 minutes before each event.
 - **Click to join** — click the widget to open the event's Meet/Zoom/Teams link, or Google Calendar if there is none. Drag to move (a click that moves is a drag).
-- **Compact pill** — when the next event is more than 3 h away, the widget collapses to just the countdown.
+- **Resizable, responsive card** — drag the corner grip like a window. The content follows the size: under ~110 px only the countdown, then the full card, then an agenda of upcoming events (up to 6), then a summary of what is left today. The size is remembered.
 - **Fullscreen aware** — hides automatically while a fullscreen app (video, game, presentation) is in front.
 - **Cheap** — 5-second UI ticks, 5-minute refreshes, OAuth token and calendar list cached. Single ~30 MB `pythonw` process.
 
