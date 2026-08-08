@@ -434,9 +434,11 @@ class Widget:
         self.root.attributes("-topmost", True)
         self.root.configure(bg=BG)
         x, y = self.cfg.get("x", 60), self.cfg.get("y", 60)
-        w = max(MIN_W, self.cfg.get("w", 212))
-        h = max(MIN_H, self.cfg.get("h", 119))
-        self.root.geometry(f"{w}x{h}+{x}+{y}")
+        # the saved size is the ceiling the user dragged to; the window then
+        # shrinks to whatever the content actually needs inside it
+        self.max_w = max(MIN_W, self.cfg.get("w", 240))
+        self.max_h = max(MIN_H, self.cfg.get("h", 210))
+        self.root.geometry(f"{self.max_w}x{self.max_h}+{x}+{y}")
 
         frame = tk.Frame(self.root, bg=BG, padx=20, pady=13,
                          highlightthickness=1,
@@ -803,14 +805,14 @@ class Widget:
         return "break"
 
     def _resize_move(self, e):
-        w = max(MIN_W, self._rs[2] + e.x_root - self._rs[0])
-        h = max(MIN_H, self._rs[3] + e.y_root - self._rs[1])
-        self.root.geometry(f"{w}x{h}")
+        self.max_w = max(MIN_W, self._rs[2] + e.x_root - self._rs[0])
+        self.max_h = max(MIN_H, self._rs[3] + e.y_root - self._rs[1])
+        self.root.geometry(f"{self.max_w}x{self.max_h}")
+        self._tick_layout()          # re-flow, then snap to the content
         return "break"
 
     def _resize_end(self, _e):
-        self.cfg["w"] = self.root.winfo_width()
-        self.cfg["h"] = self.root.winfo_height()
+        self.cfg["w"], self.cfg["h"] = self.max_w, self.max_h
         save_config(self.cfg)
         try:
             apply_liquid_glass(self.root)  # recompose the enlarged surface
@@ -819,7 +821,19 @@ class Widget:
         return "break"
 
     def _avail(self, extra=0):
-        return max(40, self.root.winfo_width() - 46 - extra)
+        # measured against the ceiling, not the current width: the window is
+        # about to shrink to the text, so sizing the text to the window
+        # would shrink both away to nothing
+        return max(40, self.max_w - 46 - extra)
+
+    def _fit_window(self):
+        """Shrink the window to its content, never past the user's ceiling."""
+        self.root.update_idletasks()
+        w = max(MIN_W, min(self.max_w, self.frame.winfo_reqwidth()))
+        h = max(MIN_H, min(self.max_h, self.frame.winfo_reqheight()))
+        if abs(w - self.root.winfo_width()) > 1 \
+                or abs(h - self.root.winfo_height()) > 1:
+            self.root.geometry(f"{w}x{h}")
 
     def _fit(self, font, text, extra=0, lines=1):
         """Trim `text` until it fits `lines` lines at the current width."""
@@ -846,7 +860,7 @@ class Widget:
         `skip` drops the events already shown above, so the list continues
         the schedule instead of repeating the next event.
         """
-        free = self.root.winfo_height() - used_h
+        free = self.max_h - used_h
         rows = max(0, min(MAX_LIST_ROWS, (free - AGENDA_BASE) // ROW_H))
         events = [e for e in self.upcoming if e[1] > now][skip:skip + rows]
         if not events:
@@ -989,12 +1003,20 @@ class Widget:
         if self.current_event and now >= self.current_event[2]:
             self.current_event = None  # just ended
             self.fetch_async()
+        self._render(now)
+        self.root.after(TICK_MS, self._tick)
+
+    def _tick_layout(self):
+        """Re-flow right now (used while the grip is being dragged)."""
+        self._render(datetime.now().astimezone())
+
+    def _render(self, now):
         # focus view whenever something is in progress (or forced), and the
         # normal view otherwise
         mode = self.view_mode.get()
         self._focus_view = (bool(self.current_event)
                             and mode in ("auto", "focus"))
-        inner = self.root.winfo_height() - PAD
+        inner = self.max_h - PAD
 
         if self._focus_view:
             c_title, c_start, c_end = self.current_event[:3]
@@ -1003,10 +1025,9 @@ class Widget:
             left = max(0, int((c_end - now).total_seconds() // 60))
             left_txt = (f"{left // 60}h {left % 60}m" if left >= 60
                         else f"{left}m")
-            width = self.root.winfo_width()
             if self.next_event:
                 self.f_next.config(text=self._fit_text(self.next_event[0]))
-            ring_px, used = self._layout_focus(inner, width, c_title)
+            ring_px, used = self._layout_focus(inner, self.max_w, c_title)
             self._draw_big_ring(pct, left_txt, ring_px)
             if self.next_event:
                 n_title, n_start = self.next_event[0], self.next_event[1]
@@ -1019,7 +1040,7 @@ class Widget:
                 self.f_next.config(text="—")
                 self.f_when.config(text="")
             self._update_agenda(now, used + PAD)
-            self.root.after(TICK_MS, self._tick)
+            self._fit_window()
             return
 
         if self.next_event:
@@ -1071,7 +1092,7 @@ class Widget:
             self.time_lbl.config(text=f"(próximos {LOOKAHEAD_DAYS} días)")
             self.count_lbl.config(text="—", fg=DIM)
         self._update_agenda(now, used + PAD)
-        self.root.after(TICK_MS, self._tick)
+        self._fit_window()
 
 
 if __name__ == "__main__":
